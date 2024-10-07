@@ -1,0 +1,17 @@
+[package]
+name = "tiny-webdav"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+ini = ["rust-ini"]
+
+[dependencies]
+dav-server = { git = "https://github.com/messense/dav-server-rs.git", default-features = false, features = ["localfs"] }
+tokio = { version = "*", default-features = false, features = ["rt-multi-thread", "macros"]}
+env_logger = "*"
+log = "*"
+clap = { version = "*", features = ["derive"] }
+rust-ini = { version = "*", optional = true }
+anyhow = "*"
+http = "*"
