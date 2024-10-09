@@ -1,16 +1,20 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, pin::Pin, sync::Arc};
 
 use dav_server::{
     davpath::DavPath,
     fakels::FakeLs,
-    fs::{FsError, GuardedFileSystem},
+    fs::{DavDirEntry, FsError, FsResult, GuardedFileSystem},
     localfs::LocalFs,
     DavHandler,
 };
+use futures_util::Stream;
 
-use crate::config::{DavConfig, DavDirConfig};
+use crate::{
+    config::{DavConfig, DavDirConfig},
+    dav::FsDirEntry,
+};
 
-type FsMap = HashMap<String, Box<LocalFs>>;
+type FsMap = Arc<HashMap<String, Box<LocalFs>>>;
 pub struct DavServer {
     handler: DavHandler<Cred>,
 }
@@ -43,35 +47,57 @@ pub struct MultiFs {
 #[derive(Clone)]
 pub struct Cred;
 
+struct DavPathParts {
+    fs_name: String,
+    path: DavPath,
+}
+
 impl MultiFs {
     pub fn new(dirs: Vec<DavDirConfig>) -> Self {
-        let fs_map = dirs
-            .into_iter()
-            .map(|r| (r.name, LocalFs::new(r.path, false, false, false)))
-            .collect::<HashMap<_, _>>();
+        let fs_map = Arc::new(
+            dirs.into_iter()
+                .map(|r| (r.name, LocalFs::new(r.path, false, false, false)))
+                .collect::<HashMap<_, _>>(),
+        );
         Self { fs_map }
     }
 
-    /// get fs and path in the fs
-    fn get_fs<'a>(&self, path: &'a DavPath) -> Result<(&Box<LocalFs>, DavPath), FsError> {
-        if self.fs_map.len() == 1 {
-            let fs = self.fs_map.iter().next().unwrap().1;
-            Ok((&fs, path.clone()))
-        } else {
-            let origin = path.as_url_string();
-            let mut coms: Vec<_> = origin.trim_start_matches('/').split('/').collect();
+    fn parse_dav_path(path: &DavPath) -> dav_server::fs::FsResult<Option<DavPathParts>> {
+        let origin = path.as_url_string();
+        let mut coms: Vec<_> = origin.trim_start_matches('/').split('/').collect();
+        if coms.is_empty() {
+            return Ok(None);
+        }
 
-            let name = coms.remove(0);
+        let name = coms.remove(0);
+        let dav_path = {
             let mut dav_path = DavPath::new(&format!("/{}", coms.join("/"))).map_err(|e| {
                 log::error!("{:?}", e);
                 FsError::GeneralFailure
             })?;
-            dav_path.set_prefix(path.prefix());
-            self.fs_map
-                .get(name)
-                .ok_or(FsError::NotFound)
-                .map(|r| (r, dav_path))
-        }
+
+            dav_path.set_prefix(path.prefix()).map_err(|e| {
+                log::error!("{:?}", e);
+                FsError::GeneralFailure
+            })?;
+            dav_path
+        };
+
+        Ok(Some(DavPathParts {
+            fs_name: name.to_owned(),
+            path: dav_path,
+        }))
+    }
+
+    /// get fs and path in the fs
+    #[inline(always)]
+    fn get_fs<'a>(&self, name: &str) -> Result<&Box<LocalFs>, FsError> {
+        self.fs_map.get(name).ok_or(FsError::NotFound)
+    }
+
+    #[inline(always)]
+    fn get_first_fs(&self) -> &Box<LocalFs> {
+        self.fs_map.iter().next().unwrap().1
     }
 }
 
@@ -80,10 +106,18 @@ impl GuardedFileSystem<Cred> for MultiFs {
         &'a self,
         path: &'a DavPath,
         options: dav_server::fs::OpenOptions,
-        credentials: &'a Cred,
+        _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<Box<dyn dav_server::fs::DavFile>> {
-        let (fs, path) = self.get_fs(path).unwrap();
-        fs.open(&path, options, &())
+        Box::pin(async move {
+            if self.fs_map.len() > 1 {
+                let DavPathParts { fs_name, path } =
+                    Self::parse_dav_path(&path)?.ok_or(FsError::NotFound)?;
+                let fs = self.get_fs(&fs_name)?;
+                fs.open(&path, options, &()).await
+            } else {
+                self.get_first_fs().open(&path, options, &()).await
+            }
+        })
     }
 
     fn read_dir<'a>(
@@ -93,7 +127,23 @@ impl GuardedFileSystem<Cred> for MultiFs {
         credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<dav_server::fs::FsStream<Box<dyn dav_server::fs::DavDirEntry>>>
     {
-        todo!()
+        Box::pin(async move {
+            if self.fs_map.len() > 1 {
+                if let Some(DavPathParts { fs_name, path }) = Self::parse_dav_path(&path)? {
+                    self.get_fs(&fs_name)?.read_dir(&path, meta, &()).await
+                } else {
+                    let entries =
+                        self.fs_map.keys().map(|k| {
+                            FsResult::Ok(
+                                Box::new(FsDirEntry::new(k.to_owned())) as Box<dyn DavDirEntry>
+                            )
+                        }).collect::<Vec<_>>();
+                    Ok(Box::pin(futures_util::stream::iter()) as _)
+                }
+            } else {
+                self.get_first_fs().read_dir(&path, meta, &()).await
+            }
+        })
     }
 
     fn metadata<'a>(

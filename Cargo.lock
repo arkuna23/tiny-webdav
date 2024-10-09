@@ -983,6 +983,7 @@ dependencies = [
  "clap",
  "dav-server",
  "env_logger",
+ "futures-util",
  "http",
  "log",
  "rust-ini",

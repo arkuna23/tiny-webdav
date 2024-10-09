@@ -3,6 +3,7 @@ use config::DavConfig;
 
 mod config;
 mod server;
+mod dav;
 
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_ADDR: &str = "127.0.0.1";
