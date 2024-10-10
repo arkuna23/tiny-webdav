@@ -16,3 +16,11 @@ rust-ini = { version = "*", optional = true }
 anyhow = "*"
 http = "*"
 futures-util = "*"
+hyper = { version = "*", features = ["http1", "server"] }
+hyper-util = { version = "*", features = ["tokio"] }
+bytes = "*"
+
+[dev-dependencies]
+dav-server = { git = "https://github.com/messense/dav-server-rs.git", default-features = false, features = ["localfs", "memfs"] }
+headers = "*"
+

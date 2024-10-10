@@ -1,9 +1,13 @@
+use std::env;
+
 use clap::Parser;
 use config::DavConfig;
+use server::DavServer;
 
 mod config;
-mod server;
 mod dav;
+mod server;
+mod util;
 
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_ADDR: &str = "127.0.0.1";
@@ -31,18 +35,23 @@ pub struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "info")
+    }
+    env_logger::init();
     #[cfg(feature = "ini")]
     let global_conf = {
         if let Some(file) = args.config.clone() {
-            DavConfig::load(args, ini::Ini::load_from_file(file)?)?;
+            DavConfig::load(args, ini::Ini::load_from_file(file)?)
         } else {
-            DavConfig::load_from_args(args)?;
+            DavConfig::load_from_args(args)
         }
-    };
+    }?;
     #[cfg(not(feature = "ini"))]
     let global_conf = DavConfig::load_from_args(args)?;
 
-    println!("{:?}", global_conf);
-
-    Ok(())
+    let sock_addr = global_conf.sock_addr.clone();
+    let server = DavServer::new(global_conf);
+    log::info!("running webdav server at {sock_addr}");
+    server.run().await
 }

@@ -1,6 +1,6 @@
 use std::{
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use crate::{DEFAULT_ADDR, DEFAULT_PORT};
