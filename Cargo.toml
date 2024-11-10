@@ -24,3 +24,9 @@ bytes = "*"
 dav-server = { git = "https://github.com/messense/dav-server-rs.git", default-features = false, features = ["localfs", "memfs"] }
 headers = "*"
 
+[profile.min]
+inherits = "release"
+strip = true
+lto = true
+opt-level = "z"
+panic = "abort"

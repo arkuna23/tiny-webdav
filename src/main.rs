@@ -50,8 +50,12 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "ini"))]
     let global_conf = DavConfig::load_from_args(args)?;
 
-    let sock_addr = global_conf.sock_addr.clone();
+    log::info!("shared dirs(<path> => <name>): ");
+    for ele in global_conf.dirs.iter() {
+        log::info!("\t{} => {}", ele.path, ele.name);
+    }
+
+    log::info!("running webdav server at {}", global_conf.sock_addr);
     let server = DavServer::new(global_conf);
-    log::info!("running webdav server at {sock_addr}");
     server.run().await
 }

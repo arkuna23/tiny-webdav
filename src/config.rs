@@ -1,7 +1,4 @@
-use std::{
-    net::SocketAddr,
-    path::Path,
-};
+use std::{net::SocketAddr, path::Path};
 
 use crate::{DEFAULT_ADDR, DEFAULT_PORT};
 use anyhow::anyhow;
@@ -91,11 +88,14 @@ impl DavConfig {
             for ele in ini.section_all(Some("Dir")) {
                 let path = ele
                     .get("path")
-                    .ok_or_else(|| anyhow!("missing field `path` in Dir section"))?;
-                dirs.push(DavDirConfig {
-                    path: path.to_owned(),
-                    name: get_dir_name(path),
-                });
+                    .ok_or_else(|| anyhow!("missing field `path` in Dir section"))?
+                    .to_owned();
+                let name = ele
+                    .get("name")
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| get_dir_name(&path));
+
+                dirs.push(DavDirConfig { path, name });
             }
             if dirs.len() == 0 {
                 dirs.push(DavDirConfig {

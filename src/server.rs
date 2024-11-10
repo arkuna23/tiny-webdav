@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 
 use crate::{
     config::{DavConfig, DavDirConfig},
-    dav::{FsDirEntry, FsFile, FsMeta},
+    dav::{FsAsDir, FsAsFile, FsMeta},
 };
 
 type FsMap = Arc<HashMap<String, Box<LocalFs>>>;
@@ -92,10 +92,11 @@ impl MultiFs {
         Self { fs_map }
     }
 
+    /// parse dav path to fs name and path in the fs, return None if root path
     fn parse_dav_path(path: &DavPath) -> dav_server::fs::FsResult<Option<DavPathParts>> {
         let origin = path.as_url_string();
         let mut coms: Vec<_> = origin.trim_start_matches('/').split('/').collect();
-        log::debug!("req path: {coms:?}");
+        log::trace!("req path: {coms:?}");
         // if get root path(because root path showing all fs, can't be parsed)
         let name = coms.remove(0);
         if name.is_empty() {
@@ -122,7 +123,7 @@ impl MultiFs {
 
     /// get fs and path in the fs
     #[inline(always)]
-    fn get_fs<'a>(&self, name: &str) -> Result<&Box<LocalFs>, FsError> {
+    fn get_fs(&self, name: &str) -> Result<&Box<LocalFs>, FsError> {
         self.fs_map.get(name).ok_or(FsError::NotFound)
     }
 
@@ -132,10 +133,10 @@ impl MultiFs {
     }
 }
 
-macro_rules! fs_action {
+macro_rules! fs_single_path_action {
     ($self:expr, $fs_func:ident, $root_path_action:expr, $path:expr, $($args:tt)*) => {
         Box::pin(async move {
-            log::debug!("fs action: {}", stringify!($fs_func));
+            log::trace!("fs action: {}", stringify!($fs_func));
             if $self.fs_map.len() > 1 {
                 if let Some(DavPathParts { fs_name, path }) = MultiFs::parse_dav_path($path)? {
                     $self.get_fs(&fs_name)?.$fs_func(&path, $($args)*).await
@@ -149,6 +150,27 @@ macro_rules! fs_action {
     };
 }
 
+macro_rules! fs_dual_path_action {
+    ($self:expr, $fs_func:ident, $root_path_action:expr, $from:expr, $to:expr, $($args:tt)*) => {
+        Box::pin(async move {
+            log::trace!("fs action: {}", stringify!($fs_func));
+            if $self.fs_map.len() > 1 {
+                let (Some(from), Some(to)) = (
+                    MultiFs::parse_dav_path($from)?, MultiFs::parse_dav_path($to)?
+                ) else {
+                    return $root_path_action;
+                };
+                if from.fs_name != to.fs_name {
+                    return Err(FsError::Forbidden);
+                }
+                $self.get_fs(&from.fs_name)?.$fs_func(&from.path, &to.path, $($args)*).await
+            } else {
+                $self.get_first_fs().$fs_func($from, $to, $($args)*).await
+            }
+        })
+    };
+}
+
 impl GuardedFileSystem<Cred> for MultiFs {
     fn open<'a>(
         &'a self,
@@ -156,10 +178,10 @@ impl GuardedFileSystem<Cred> for MultiFs {
         options: dav_server::fs::OpenOptions,
         _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<Box<dyn dav_server::fs::DavFile>> {
-        fs_action!(
+        fs_single_path_action!(
             self,
             open,
-            Ok(Box::new(FsFile::default()) as _),
+            Ok(Box::new(FsAsFile::default()) as _),
             &path,
             options,
             &()
@@ -173,19 +195,17 @@ impl GuardedFileSystem<Cred> for MultiFs {
         _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<dav_server::fs::FsStream<Box<dyn dav_server::fs::DavDirEntry>>>
     {
-        fs_action!(
+        fs_single_path_action!(
             self,
             read_dir,
             {
-                let entries =
-                    self.fs_map
-                        .keys()
-                        .map(|k| {
-                            FsResult::Ok(
-                                Box::new(FsDirEntry::new(k.to_owned())) as Box<dyn DavDirEntry>
-                            )
-                        })
-                        .collect::<Vec<_>>();
+                let entries = self
+                    .fs_map
+                    .keys()
+                    .map(|k| {
+                        FsResult::Ok(Box::new(FsAsDir::new(k.to_owned())) as Box<dyn DavDirEntry>)
+                    })
+                    .collect::<Vec<_>>();
                 Ok(Box::pin(futures_util::stream::iter(entries)) as _)
             },
             &path,
@@ -199,7 +219,7 @@ impl GuardedFileSystem<Cred> for MultiFs {
         path: &'a dav_server::davpath::DavPath,
         _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<Box<dyn dav_server::fs::DavMetaData>> {
-        fs_action!(
+        fs_single_path_action!(
             self,
             metadata,
             Ok(Box::new(FsMeta::default()) as _),
@@ -213,7 +233,7 @@ impl GuardedFileSystem<Cred> for MultiFs {
         path: &'a DavPath,
         _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<Box<dyn dav_server::fs::DavMetaData>> {
-        fs_action!(
+        fs_single_path_action!(
             self,
             symlink_metadata,
             Ok(Box::new(FsMeta::default()) as _),
@@ -227,7 +247,7 @@ impl GuardedFileSystem<Cred> for MultiFs {
         path: &'a DavPath,
         _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<()> {
-        fs_action!(self, create_dir, Err(FsError::Forbidden), &path, &())
+        fs_single_path_action!(self, create_dir, Err(FsError::Forbidden), &path, &())
     }
 
     fn remove_dir<'a>(
@@ -235,7 +255,7 @@ impl GuardedFileSystem<Cred> for MultiFs {
         path: &'a DavPath,
         _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<()> {
-        fs_action!(self, remove_dir, Err(FsError::Forbidden), &path, &())
+        fs_single_path_action!(self, remove_dir, Err(FsError::Forbidden), &path, &())
     }
 
     fn remove_file<'a>(
@@ -243,7 +263,7 @@ impl GuardedFileSystem<Cred> for MultiFs {
         path: &'a DavPath,
         _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<()> {
-        fs_action!(self, remove_file, Err(FsError::Forbidden), &path, &())
+        fs_single_path_action!(self, remove_file, Err(FsError::Forbidden), &path, &())
     }
 
     fn rename<'a>(
@@ -252,7 +272,7 @@ impl GuardedFileSystem<Cred> for MultiFs {
         to: &'a DavPath,
         _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<()> {
-        fs_action!(self, rename, Err(FsError::Forbidden), &from, &to, &())
+        fs_dual_path_action!(self, rename, Err(FsError::Forbidden), &from, &to, &())
     }
 
     fn copy<'a>(
@@ -261,16 +281,6 @@ impl GuardedFileSystem<Cred> for MultiFs {
         to: &'a DavPath,
         _credentials: &'a Cred,
     ) -> dav_server::fs::FsFuture<()> {
-        fs_action!(
-            self,
-            copy,
-            {
-                log::warn!("copy cross fs not implemented");
-                Err(FsError::NotImplemented)
-            },
-            &from,
-            &to,
-            &()
-        )
+        fs_dual_path_action!(self, copy, Err(FsError::Forbidden), &from, &to, &())
     }
 }
